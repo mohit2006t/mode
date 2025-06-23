@@ -24,8 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const CHUNK_SIZE = 256 * 1024;
     let selectedFile = null, peer = null, selfPeerId = null, currentId = null;
     let isSender = true, isSharing = false, copyTimeout = null;
-    
-    let receiverData = {};
+    let worker = null;
 
     const socket = io();
     const urlParams = new URLSearchParams(window.location.search);
@@ -97,45 +96,49 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function setupReceiverConnection(conn) {
-        receiverData = {
-            conn: conn,
-            receivedBuffer: [],
-            receivedSize: 0,
-            totalFileSize: 0,
-            receivedFileName: '',
-            speedInterval: null,
-            lastReceivedSize: 0
-        };
+        worker = new Worker('worker.js');
+        worker.onmessage = onWorkerMessage;
+        let receivedFileName = '';
 
-        conn.on('data', (data) => onReceiverData(data));
-        conn.on('close', () => showError("Transfer interrupted."));
-    }
-
-    function onReceiverData(data) {
-        if (data.type === 'file-info') {
-            receiverData.totalFileSize = data.fileSize;
-            receiverData.receivedFileName = data.fileName;
-            receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${data.fileName}</p><p class="text-sm text-zinc-600">${formatFileSize(data.fileSize)}</p>`;
-            acceptBtn.classList.remove('hidden');
-        } else {
-            receiverData.receivedBuffer.push(data);
-            receiverData.receivedSize += data.byteLength;
-            if (receiverData.receivedSize >= receiverData.totalFileSize) {
-                assembleAndDownloadFile();
+        conn.on('data', (data) => {
+            if (data.type === 'file-info') {
+                receivedFileName = data.fileName;
+                receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${data.fileName}</p><p class="text-sm text-zinc-600">${formatFileSize(data.fileSize)}</p>`;
+                acceptBtn.classList.remove('hidden');
+                worker.postMessage({ type: 'info', payload: { fileSize: data.fileSize } });
+            } else {
+                worker.postMessage({ type: 'chunk', payload: data }, [data]);
             }
-        }
+        });
+        conn.on('close', () => showError("Transfer interrupted."));
+
+        acceptBtn.addEventListener('click', () => {
+            acceptBtn.classList.add('hidden');
+            downloadProgressBar.classList.remove('hidden');
+            conn.send({ type: 'start-transfer' });
+        });
+        
+        worker.addEventListener('message', (event) => {
+            if(event.data.type === 'complete'){
+                const blob = event.data.payload;
+                downloadLink.href = URL.createObjectURL(blob);
+                downloadLink.download = receivedFileName;
+            }
+        });
     }
 
-    function assembleAndDownloadFile() {
-        updateSpeedAndPercentage();
-        clearInterval(receiverData.speedInterval);
-        transferStatsDiv.textContent = 'Transfer complete!';
-        const blob = new Blob(receiverData.receivedBuffer);
-        downloadLink.href = URL.createObjectURL(blob);
-        downloadLink.download = receiverData.receivedFileName;
-        downloadAreaDiv.classList.remove('hidden');
-        receiverData.receivedBuffer = [];
-        receiverData.receivedSize = 0;
+    function onWorkerMessage(event) {
+        const { type, payload } = event.data;
+
+        if (type === 'progress') {
+            const { percent, bytesSinceLast } = payload;
+            const speed = formatFileSize(bytesSinceLast);
+            downloadProgressFill.style.width = `${percent}%`;
+            transferStatsDiv.innerHTML = `<span>${Math.round(percent)}%</span><span class="mx-2 text-zinc-400">|</span><span>${speed}/s</span>`;
+        } else if (type === 'complete') {
+            transferStatsDiv.textContent = 'Transfer complete!';
+            downloadAreaDiv.classList.remove('hidden');
+        }
     }
 
     socket.on('id-created', (id) => {
@@ -160,17 +163,8 @@ document.addEventListener('DOMContentLoaded', () => {
         showError(data.message);
         acceptBtn.classList.add('hidden');
         downloadProgressBar.classList.add('hidden');
-        if (receiverData.speedInterval) clearInterval(receiverData.speedInterval);
+        if (worker) worker.terminate();
     });
-
-    function updateSpeedAndPercentage() {
-        const percent = receiverData.totalFileSize > 0 ? (receiverData.receivedSize / receiverData.totalFileSize) * 100 : 0;
-        downloadProgressFill.style.width = `${percent}%`;
-        const bytesSinceLast = receiverData.receivedSize - receiverData.lastReceivedSize;
-        receiverData.lastReceivedSize = receiverData.receivedSize;
-        const speed = formatFileSize(bytesSinceLast);
-        transferStatsDiv.innerHTML = `<span>${Math.round(percent)}%</span><span class="mx-2 text-zinc-400">|</span><span>${speed}/s</span>`;
-    }
 
     uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('border-zinc-700'); });
     uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('border-zinc-700'));
@@ -190,13 +184,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 copyBtnIcon.classList.add('hidden');
             }, 2000);
         });
-    });
-
-    acceptBtn.addEventListener('click', () => {
-        acceptBtn.classList.add('hidden');
-        downloadProgressBar.classList.remove('hidden');
-        receiverData.conn.send({ type: 'start-transfer' });
-        receiverData.speedInterval = setInterval(updateSpeedAndPercentage, 1000);
     });
 
     window.addEventListener('beforeunload', (event) => {
