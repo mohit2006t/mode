@@ -16,7 +16,11 @@ io.on('connection', (socket) => {
         if (ids[id]) {
             socket.emit('id-exists', id);
         } else {
-            ids[id] = { senderSocketId: socket.id, senderPeerId: peerId, receiverSocketId: null };
+            ids[id] = { 
+                senderSocketId: socket.id, 
+                senderPeerId: peerId, 
+                receivers: [] 
+            };
             socket.join(id);
             socket.emit('id-created', id);
         }
@@ -24,13 +28,10 @@ io.on('connection', (socket) => {
 
     socket.on('join-id', (id) => {
         const session = ids[id];
-        if (session && !session.receiverSocketId) {
-            session.receiverSocketId = socket.id;
+        if (session) {
+            session.receivers.push(socket.id);
             socket.join(id);
-            socket.emit('sender-info', { peerId: session.senderPeerId, id: id });
-            io.to(session.senderSocketId).emit('receiver-joined', { receiverSocketId: socket.id, id: id });
-        } else if (session) {
-            socket.emit('id-full', id);
+            socket.emit('sender-info', { peerId: session.senderPeerId });
         } else {
             socket.emit('id-not-found', id);
         }
@@ -40,15 +41,18 @@ io.on('connection', (socket) => {
         for (const id in ids) {
             const session = ids[id];
             if (session.senderSocketId === socket.id) {
-                if (session.receiverSocketId) {
-                    io.to(session.receiverSocketId).emit('peer-disconnected', { id, message: 'Sender has disconnected.' });
-                }
+                session.receivers.forEach(receiverSocketId => {
+                    io.to(receiverSocketId).emit('peer-disconnected', { id, message: 'Sender has disconnected.' });
+                });
                 delete ids[id];
                 break;
-            } else if (session.receiverSocketId === socket.id) {
-                io.to(session.senderSocketId).emit('peer-disconnected', { id, message: 'Receiver has disconnected.' });
-                session.receiverSocketId = null;
-                break;
+            } else {
+                const receiverIndex = session.receivers.indexOf(socket.id);
+                if (receiverIndex !== -1) {
+                    session.receivers.splice(receiverIndex, 1);
+                    io.to(session.senderSocketId).emit('receiver-left', { receiverSocketId: socket.id });
+                    break;
+                }
             }
         }
     });

@@ -1,40 +1,23 @@
 document.addEventListener('DOMContentLoaded', () => {
-    const senderUiDiv = document.getElementById('sender-ui');
-    const receiverUiDiv = document.getElementById('receiver-ui');
-    const uploadContainer = document.getElementById('upload-container');
-    const sharingContainer = document.getElementById('sharing-container');
-    const uploadArea = document.getElementById('upload-area');
-    const fileInput = document.getElementById('file-input');
-    const shareBtn = document.getElementById('share-btn');
-    const fileInfoDiv = document.getElementById('file-info');
-    const sharingFileInfoDiv = document.getElementById('sharing-file-info');
-    const linkInput = document.getElementById('link-input');
-    const copyBtn = document.getElementById('copy-btn');
-    const copyBtnText = document.getElementById('copy-btn-text');
-    const copyBtnIcon = document.getElementById('copy-btn-icon');
-    const receivingFileInfoDiv = document.getElementById('receiving-file-info');
-    const acceptBtn = document.getElementById('accept-btn');
-    const transferStatsDiv = document.getElementById('transfer-stats');
-    const downloadAreaDiv = document.getElementById('download-area');
+    const senderUiDiv = document.getElementById('sender-ui'), receiverUiDiv = document.getElementById('receiver-ui');
+    const uploadContainer = document.getElementById('upload-container'), sharingContainer = document.getElementById('sharing-container');
+    const uploadArea = document.getElementById('upload-area'), fileInput = document.getElementById('file-input');
+    const shareBtn = document.getElementById('share-btn'), fileInfoDiv = document.getElementById('file-info');
+    const sharingFileInfoDiv = document.getElementById('sharing-file-info'), linkInput = document.getElementById('link-input');
+    const copyBtn = document.getElementById('copy-btn'), copyBtnText = document.getElementById('copy-btn-text'), copyBtnIcon = document.getElementById('copy-btn-icon');
+    const receivingFileInfoDiv = document.getElementById('receiving-file-info'), acceptBtn = document.getElementById('accept-btn');
+    const transferStatsDiv = document.getElementById('transfer-stats'), downloadAreaDiv = document.getElementById('download-area');
     const downloadLink = document.getElementById('download-link');
-    const downloadProgressBar = document.getElementById('download-progress-bar');
-    const downloadProgressFill = document.getElementById('download-progress-fill');
+    const downloadProgressBar = document.getElementById('download-progress-bar'), downloadProgressFill = document.getElementById('download-progress-fill');
     const errorMessageDiv = document.getElementById('error-message');
 
     const CHUNK_SIZE = 256 * 1024;
-    let selectedFile = null;
-    let peer = null;
-    let dataConnection = null;
-    let selfPeerId = null;
-    let currentId = null;
-    let receivedFileName = '';
-    let isSender = true;
-    let receivedSize = 0;
-    let totalFileSize = 0;
+    let selectedFile = null, peer = null, dataConnection = null;
+    let selfPeerId = null, currentId = null, receivedFileName = '';
+    let isSender = true, receivedSize = 0, totalFileSize = 0;
     let isSharing = false;
-    let receivedBuffer = [];
-    let speedInterval = null;
-    let lastReceivedSize = 0;
+    let receivedBuffer = [], speedInterval = null, lastReceivedSize = 0;
+    let connections = new Map();
 
     const socket = io();
     const urlParams = new URLSearchParams(window.location.search);
@@ -56,37 +39,47 @@ document.addEventListener('DOMContentLoaded', () => {
             peer = new Peer();
             peer.on('open', (id) => {
                 selfPeerId = id;
-                if (isSender) shareBtn.disabled = false;
-                else if (currentId) socket.emit('join-id', currentId);
+                if (isSender) {
+                    shareBtn.disabled = false;
+                } else if (currentId) {
+                    socket.emit('join-id', currentId);
+                }
             });
-            peer.on('connection', setupConnection);
+            peer.on('connection', (conn) => {
+                if (isSender) {
+                    setupSenderConnection(conn);
+                }
+            });
             peer.on('error', (err) => console.error(`PeerJS error: ${err.message}`));
-        } catch (e) {
-            console.error("Failed to initialize PeerJS.", e);
-        }
+        } catch (e) { console.error("Failed to initialize PeerJS.", e); }
     }
 
-    function setupConnection(conn) {
-        dataConnection = conn;
-        dataConnection.on('open', () => {
-            if (isSender && selectedFile) {
-                dataConnection.send({ type: 'file-info', fileName: selectedFile.name, fileSize: selectedFile.size });
+    function setupSenderConnection(conn) {
+        connections.set(conn.peer, conn);
+        conn.on('open', () => {
+            conn.send({ type: 'file-info', fileName: selectedFile.name, fileSize: selectedFile.size });
+        });
+        conn.on('data', (data) => {
+            if (data.type === 'start-transfer') {
+                sendFile();
             }
         });
-        dataConnection.on('data', onDataReceived);
-        dataConnection.on('close', () => {
-            if (!isSender) showError("Transfer interrupted.");
+        conn.on('close', () => {
+            connections.delete(conn.peer);
         });
+    }
+
+    function setupReceiverConnection(conn) {
+        dataConnection = conn;
+        dataConnection.on('data', onDataReceived);
+        dataConnection.on('close', () => showError("Transfer interrupted."));
     }
 
     function onDataReceived(data) {
         if (data.type === 'file-info') {
-            totalFileSize = data.fileSize;
-            receivedFileName = data.fileName;
+            totalFileSize = data.fileSize; receivedFileName = data.fileName;
             receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${receivedFileName}</p><p class="text-sm text-zinc-600">${formatFileSize(totalFileSize)}</p>`;
             acceptBtn.classList.remove('hidden');
-        } else if (data.type === 'start-transfer' && isSender) {
-            sendFile();
         } else {
             receivedBuffer.push(data);
             receivedSize += data.byteLength;
@@ -94,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    socket.on('id-created', (id) => {
+    socket.on('id-created', id => {
         uploadContainer.classList.add('hidden');
         sharingContainer.classList.remove('hidden');
         setTimeout(() => sharingContainer.classList.remove('opacity-0'), 10);
@@ -102,29 +95,36 @@ document.addEventListener('DOMContentLoaded', () => {
         linkInput.value = `${window.location.origin}/?id=${id}`;
         isSharing = true;
     });
-    socket.on('id-not-found', () => showError("Share ID not found. Check the link."));
-    socket.on('id-full', () => showError("This share is currently full."));
+
     socket.on('sender-info', (data) => {
-        if (!isSender && peer) setupConnection(peer.connect(data.peerId, { reliable: true }));
+        if (!isSender && peer) {
+            const conn = peer.connect(data.peerId, { reliable: true });
+            setupReceiverConnection(conn);
+        }
     });
+
+    socket.on('id-not-found', () => showError("Share ID not found. Check the link."));
 
     async function sendFile() {
         let offset = 0;
-        while (offset < selectedFile.size) {
-            if (dataConnection.bufferedAmount > CHUNK_SIZE * 4) {
-                await new Promise(r => setTimeout(r, 50));
-                continue;
-            }
+        const sendChunk = async () => {
+            if (offset >= selectedFile.size) return;
+
             const chunk = selectedFile.slice(offset, offset + CHUNK_SIZE);
             try {
                 const buffer = await chunk.arrayBuffer();
-                dataConnection.send(buffer);
+                for (const conn of connections.values()) {
+                    if (conn.open) {
+                        conn.send(buffer);
+                    }
+                }
                 offset += buffer.byteLength;
+                setTimeout(sendChunk, 10);
             } catch (e) {
                 console.error("Error reading chunk:", e);
-                return;
             }
-        }
+        };
+        sendChunk();
     }
 
     function assembleAndDownloadFile() {
@@ -142,8 +142,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateSpeedAndPercentage() {
         const percent = totalFileSize > 0 ? (receivedSize / totalFileSize) * 100 : 0;
         downloadProgressFill.style.width = `${percent}%`;
-        const bytesSinceLast = receivedSize - lastReceivedSize;
-        lastReceivedSize = receivedSize;
+        const bytesSinceLast = receivedSize - lastReceivedSize; lastReceivedSize = receivedSize;
         const speed = formatFileSize(bytesSinceLast);
         transferStatsDiv.innerHTML = `<span>${Math.round(percent)}%</span><span class="mx-2 text-zinc-400">|</span><span>${speed}/s</span>`;
     }
@@ -157,8 +156,7 @@ document.addEventListener('DOMContentLoaded', () => {
     copyBtn.addEventListener('click', () => {
         linkInput.select();
         navigator.clipboard.writeText(linkInput.value).then(() => {
-            copyBtnText.textContent = "Copied!";
-            copyBtnIcon.classList.remove('hidden');
+            copyBtnText.textContent = "Copied!"; copyBtnIcon.classList.remove('hidden');
             setTimeout(() => { copyBtnText.textContent = "Copy"; copyBtnIcon.classList.add('hidden'); }, 2000);
         });
     });
@@ -180,8 +178,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function showError(message) { if (errorMessageDiv) errorMessageDiv.textContent = message; }
     function formatFileSize(bytes) {
         if (bytes === 0) return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
     }
