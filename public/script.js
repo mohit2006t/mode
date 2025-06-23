@@ -1,4 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // UI Elements
     const senderUiDiv = document.getElementById('sender-ui');
     const receiverUiDiv = document.getElementById('receiver-ui');
     const uploadContainer = document.getElementById('upload-container');
@@ -21,15 +22,22 @@ document.addEventListener('DOMContentLoaded', () => {
     const downloadProgressFill = document.getElementById('download-progress-fill');
     const errorMessageDiv = document.getElementById('error-message');
 
+    // State
     const CHUNK_SIZE = 256 * 1024;
-    let selectedFile = null, peer = null, selfPeerId = null, currentId = null;
-    let isSender = true, isSharing = false, copyTimeout = null;
+    let selectedFile = null;
+    let peer = null;
+    let selfPeerId = null;
+    let currentId = null;
+    let isSender = true;
+    let isSharing = false;
+    let copyTimeout = null;
     let worker = null;
 
     const socket = io();
     const urlParams = new URLSearchParams(window.location.search);
     const idFromUrl = urlParams.get('id');
 
+    // --- INITIALIZATION ---
     if (idFromUrl) {
         isSender = false;
         currentId = idFromUrl;
@@ -54,7 +62,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             if (isSender) {
-                peer.on('connection', setupSenderConnectionForReceiver);
+                peer.on('connection', setupSenderConnection);
             }
             peer.on('error', (err) => console.error(`PeerJS error: ${err.message}`));
         } catch (e) {
@@ -62,7 +70,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function setupSenderConnectionForReceiver(conn) {
+    // --- SENDER-SIDE LOGIC ---
+    function setupSenderConnection(conn) {
         conn.on('open', () => {
             if (selectedFile) {
                 conn.send({ type: 'file-info', fileName: selectedFile.name, fileSize: selectedFile.size });
@@ -95,9 +104,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // --- RECEIVER-SIDE LOGIC ---
     function setupReceiverConnection(conn) {
         worker = new Worker('worker.js');
-        worker.onmessage = onWorkerMessage;
+        worker.onmessage = (event) => onWorkerMessage(event.data);
+
         let receivedFileName = '';
 
         conn.on('data', (data) => {
@@ -118,29 +129,24 @@ document.addEventListener('DOMContentLoaded', () => {
             conn.send({ type: 'start-transfer' });
         });
         
-        worker.addEventListener('message', (event) => {
-            if(event.data.type === 'complete'){
-                const blob = event.data.payload;
-                downloadLink.href = URL.createObjectURL(blob);
+        function onWorkerMessage(data) {
+            const { type, payload } = data;
+            if (type === 'progress') {
+                const { percent, bytesSinceLast } = payload;
+                const speed = formatFileSize(bytesSinceLast);
+                downloadProgressFill.style.width = `${percent}%`;
+                transferStatsDiv.innerHTML = `<span>${Math.round(percent)}%</span><span class="mx-2 text-zinc-400">|</span><span>${speed}/s</span>`;
+            } else if (type === 'complete') {
+                transferStatsDiv.textContent = 'Transfer complete!';
+                downloadLink.href = URL.createObjectURL(payload);
                 downloadLink.download = receivedFileName;
+                downloadAreaDiv.classList.remove('hidden');
+                worker.terminate();
             }
-        });
-    }
-
-    function onWorkerMessage(event) {
-        const { type, payload } = event.data;
-
-        if (type === 'progress') {
-            const { percent, bytesSinceLast } = payload;
-            const speed = formatFileSize(bytesSinceLast);
-            downloadProgressFill.style.width = `${percent}%`;
-            transferStatsDiv.innerHTML = `<span>${Math.round(percent)}%</span><span class="mx-2 text-zinc-400">|</span><span>${speed}/s</span>`;
-        } else if (type === 'complete') {
-            transferStatsDiv.textContent = 'Transfer complete!';
-            downloadAreaDiv.classList.remove('hidden');
         }
     }
 
+    // --- SOCKET.IO LISTENERS ---
     socket.on('id-created', (id) => {
         uploadContainer.classList.add('hidden');
         sharingContainer.classList.remove('hidden');
@@ -166,6 +172,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (worker) worker.terminate();
     });
 
+    // --- UI EVENT LISTENERS & HELPERS ---
     uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('border-zinc-700'); });
     uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('border-zinc-700'));
     uploadArea.addEventListener('drop', (e) => { e.preventDefault(); uploadArea.classList.remove('border-zinc-700'); if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });

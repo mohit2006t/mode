@@ -12,6 +12,7 @@ self.onmessage = (event) => {
             totalFileSize = payload.fileSize;
             receivedBuffer = [];
             receivedSize = 0;
+            lastReceivedSize = 0;
             speedInterval = setInterval(postProgress, 1000);
             break;
 
@@ -20,9 +21,10 @@ self.onmessage = (event) => {
             receivedSize += payload.byteLength;
             
             if (receivedSize >= totalFileSize) {
+                clearInterval(speedInterval);
+                postProgress();
                 const blob = new Blob(receivedBuffer);
                 self.postMessage({ type: 'complete', payload: blob });
-                clearInterval(speedInterval);
                 receivedBuffer = [];
             }
             break;
