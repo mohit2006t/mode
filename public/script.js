@@ -22,19 +22,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const errorMessageDiv = document.getElementById('error-message');
 
     const CHUNK_SIZE = 256 * 1024;
-    let selectedFile = null;
-    let peer = null;
-    let dataConnection = null;
-    let selfPeerId = null;
-    let currentId = null;
-    let receivedFileName = '';
-    let isSender = true;
-    let receivedSize = 0;
-    let totalFileSize = 0;
-    let isSharing = false;
-    let receivedBuffer = [];
-    let speedInterval = null;
-    let lastReceivedSize = 0;
+    let selectedFile = null, peer = null, selfPeerId = null, currentId = null;
+    let isSender = true, isSharing = false, copyTimeout = null;
+    
+    let receiverData = {};
 
     const socket = io();
     const urlParams = new URLSearchParams(window.location.search);
@@ -56,42 +47,95 @@ document.addEventListener('DOMContentLoaded', () => {
             peer = new Peer();
             peer.on('open', (id) => {
                 selfPeerId = id;
-                if (isSender) shareBtn.disabled = false;
-                else if (currentId) socket.emit('join-id', currentId);
+                if (isSender) {
+                    shareBtn.disabled = false;
+                } else {
+                    socket.emit('join-id', currentId);
+                }
             });
-            peer.on('connection', setupConnection);
+
+            if (isSender) {
+                peer.on('connection', setupSenderConnectionForReceiver);
+            }
             peer.on('error', (err) => console.error(`PeerJS error: ${err.message}`));
         } catch (e) {
             console.error("Failed to initialize PeerJS.", e);
         }
     }
 
-    function setupConnection(conn) {
-        dataConnection = conn;
-        dataConnection.on('open', () => {
-            if (isSender && selectedFile) {
-                dataConnection.send({ type: 'file-info', fileName: selectedFile.name, fileSize: selectedFile.size });
+    function setupSenderConnectionForReceiver(conn) {
+        conn.on('open', () => {
+            if (selectedFile) {
+                conn.send({ type: 'file-info', fileName: selectedFile.name, fileSize: selectedFile.size });
             }
         });
-        dataConnection.on('data', onDataReceived);
-        dataConnection.on('close', () => {
-            if (!isSender) showError("Transfer interrupted.");
+        conn.on('data', (data) => {
+            if (data.type === 'start-transfer') {
+                sendFileToReceiver(conn);
+            }
         });
     }
 
-    function onDataReceived(data) {
-        if (data.type === 'file-info') {
-            totalFileSize = data.fileSize;
-            receivedFileName = data.fileName;
-            receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${receivedFileName}</p><p class="text-sm text-zinc-600">${formatFileSize(totalFileSize)}</p>`;
-            acceptBtn.classList.remove('hidden');
-        } else if (data.type === 'start-transfer' && isSender) {
-            sendFile();
-        } else {
-            receivedBuffer.push(data);
-            receivedSize += data.byteLength;
-            if (receivedSize >= totalFileSize) assembleAndDownloadFile();
+    async function sendFileToReceiver(conn) {
+        let offset = 0;
+        const file = selectedFile;
+        while (offset < file.size) {
+            if (conn.bufferedAmount > CHUNK_SIZE * 4) {
+                await new Promise(r => setTimeout(r, 50));
+                continue;
+            }
+            const chunk = file.slice(offset, offset + CHUNK_SIZE);
+            try {
+                const buffer = await chunk.arrayBuffer();
+                conn.send(buffer);
+                offset += buffer.byteLength;
+            } catch (e) {
+                console.error("Error reading file chunk:", e);
+                return;
+            }
         }
+    }
+
+    function setupReceiverConnection(conn) {
+        receiverData = {
+            conn: conn,
+            receivedBuffer: [],
+            receivedSize: 0,
+            totalFileSize: 0,
+            receivedFileName: '',
+            speedInterval: null,
+            lastReceivedSize: 0
+        };
+
+        conn.on('data', (data) => onReceiverData(data));
+        conn.on('close', () => showError("Transfer interrupted."));
+    }
+
+    function onReceiverData(data) {
+        if (data.type === 'file-info') {
+            receiverData.totalFileSize = data.fileSize;
+            receiverData.receivedFileName = data.fileName;
+            receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${data.fileName}</p><p class="text-sm text-zinc-600">${formatFileSize(data.fileSize)}</p>`;
+            acceptBtn.classList.remove('hidden');
+        } else {
+            receiverData.receivedBuffer.push(data);
+            receiverData.receivedSize += data.byteLength;
+            if (receiverData.receivedSize >= receiverData.totalFileSize) {
+                assembleAndDownloadFile();
+            }
+        }
+    }
+
+    function assembleAndDownloadFile() {
+        updateSpeedAndPercentage();
+        clearInterval(receiverData.speedInterval);
+        transferStatsDiv.textContent = 'Transfer complete!';
+        const blob = new Blob(receiverData.receivedBuffer);
+        downloadLink.href = URL.createObjectURL(blob);
+        downloadLink.download = receiverData.receivedFileName;
+        downloadAreaDiv.classList.remove('hidden');
+        receiverData.receivedBuffer = [];
+        receiverData.receivedSize = 0;
     }
 
     socket.on('id-created', (id) => {
@@ -102,48 +146,28 @@ document.addEventListener('DOMContentLoaded', () => {
         linkInput.value = `${window.location.origin}/?id=${id}`;
         isSharing = true;
     });
+
     socket.on('id-not-found', () => showError("Share ID not found. Check the link."));
-    socket.on('id-full', () => showError("This share is currently full."));
+    
     socket.on('sender-info', (data) => {
-        if (!isSender && peer) setupConnection(peer.connect(data.peerId, { reliable: true }));
+        if (!isSender && peer) {
+            const conn = peer.connect(data.peerId, { reliable: true });
+            setupReceiverConnection(conn);
+        }
     });
 
-    async function sendFile() {
-        let offset = 0;
-        while (offset < selectedFile.size) {
-            if (dataConnection.bufferedAmount > CHUNK_SIZE * 4) {
-                await new Promise(r => setTimeout(r, 50));
-                continue;
-            }
-            const chunk = selectedFile.slice(offset, offset + CHUNK_SIZE);
-            try {
-                const buffer = await chunk.arrayBuffer();
-                dataConnection.send(buffer);
-                offset += buffer.byteLength;
-            } catch (e) {
-                console.error("Error reading chunk:", e);
-                return;
-            }
-        }
-    }
-
-    function assembleAndDownloadFile() {
-        updateSpeedAndPercentage();
-        clearInterval(speedInterval);
-        transferStatsDiv.textContent = 'Transfer complete!';
-        const blob = new Blob(receivedBuffer);
-        downloadLink.href = URL.createObjectURL(blob);
-        downloadLink.download = receivedFileName;
-        downloadAreaDiv.classList.remove('hidden');
-        receivedBuffer = [];
-        receivedSize = 0;
-    }
+    socket.on('peer-disconnected', (data) => {
+        showError(data.message);
+        acceptBtn.classList.add('hidden');
+        downloadProgressBar.classList.add('hidden');
+        if (receiverData.speedInterval) clearInterval(receiverData.speedInterval);
+    });
 
     function updateSpeedAndPercentage() {
-        const percent = totalFileSize > 0 ? (receivedSize / totalFileSize) * 100 : 0;
+        const percent = receiverData.totalFileSize > 0 ? (receiverData.receivedSize / receiverData.totalFileSize) * 100 : 0;
         downloadProgressFill.style.width = `${percent}%`;
-        const bytesSinceLast = receivedSize - lastReceivedSize;
-        lastReceivedSize = receivedSize;
+        const bytesSinceLast = receiverData.receivedSize - receiverData.lastReceivedSize;
+        receiverData.lastReceivedSize = receiverData.receivedSize;
         const speed = formatFileSize(bytesSinceLast);
         transferStatsDiv.innerHTML = `<span>${Math.round(percent)}%</span><span class="mx-2 text-zinc-400">|</span><span>${speed}/s</span>`;
     }
@@ -154,19 +178,25 @@ document.addEventListener('DOMContentLoaded', () => {
     uploadArea.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => fileInput.files.length && handleFile(fileInput.files[0]));
     shareBtn.addEventListener('click', () => { if (selectedFile && selfPeerId) socket.emit('create-id', { id: generateId(), peerId: selfPeerId }); });
+    
     copyBtn.addEventListener('click', () => {
+        if (copyTimeout) clearTimeout(copyTimeout);
         linkInput.select();
         navigator.clipboard.writeText(linkInput.value).then(() => {
             copyBtnText.textContent = "Copied!";
             copyBtnIcon.classList.remove('hidden');
-            setTimeout(() => { copyBtnText.textContent = "Copy"; copyBtnIcon.classList.add('hidden'); }, 2000);
+            copyTimeout = setTimeout(() => {
+                copyBtnText.textContent = "Copy";
+                copyBtnIcon.classList.add('hidden');
+            }, 2000);
         });
     });
+
     acceptBtn.addEventListener('click', () => {
         acceptBtn.classList.add('hidden');
         downloadProgressBar.classList.remove('hidden');
-        dataConnection.send({ type: 'start-transfer' });
-        speedInterval = setInterval(updateSpeedAndPercentage, 1000);
+        receiverData.conn.send({ type: 'start-transfer' });
+        receiverData.speedInterval = setInterval(updateSpeedAndPercentage, 1000);
     });
 
     window.addEventListener('beforeunload', (event) => {
@@ -180,8 +210,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function showError(message) { if (errorMessageDiv) errorMessageDiv.textContent = message; }
     function formatFileSize(bytes) {
         if (bytes === 0) return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
     }
