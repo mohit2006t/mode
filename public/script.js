@@ -1,5 +1,4 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // UI Elements
     const senderUiDiv = document.getElementById('sender-ui');
     const receiverUiDiv = document.getElementById('receiver-ui');
     const uploadContainer = document.getElementById('upload-container');
@@ -22,22 +21,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const downloadProgressFill = document.getElementById('download-progress-fill');
     const errorMessageDiv = document.getElementById('error-message');
 
-    // State
     const CHUNK_SIZE = 256 * 1024;
-    let selectedFile = null;
-    let peer = null;
-    let selfPeerId = null;
-    let currentId = null;
-    let isSender = true;
-    let isSharing = false;
-    let copyTimeout = null;
-    let worker = null;
+    let selectedFile = null, peer = null, selfPeerId = null, currentId = null;
+    let isSender = true, isSharing = false, copyTimeout = null;
 
     const socket = io();
     const urlParams = new URLSearchParams(window.location.search);
     const idFromUrl = urlParams.get('id');
 
-    // --- INITIALIZATION ---
     if (idFromUrl) {
         isSender = false;
         currentId = idFromUrl;
@@ -70,7 +61,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // --- SENDER-SIDE LOGIC ---
     function setupSenderConnection(conn) {
         conn.on('open', () => {
             if (selectedFile) {
@@ -104,33 +94,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // --- RECEIVER-SIDE LOGIC ---
     function setupReceiverConnection(conn) {
-        worker = new Worker('worker.js');
-        worker.onmessage = (event) => onWorkerMessage(event.data);
-
+        const worker = new Worker('worker.js');
         let receivedFileName = '';
 
-        conn.on('data', (data) => {
-            if (data.type === 'file-info') {
-                receivedFileName = data.fileName;
-                receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${data.fileName}</p><p class="text-sm text-zinc-600">${formatFileSize(data.fileSize)}</p>`;
-                acceptBtn.classList.remove('hidden');
-                worker.postMessage({ type: 'info', payload: { fileSize: data.fileSize } });
-            } else {
-                worker.postMessage({ type: 'chunk', payload: data }, [data]);
-            }
-        });
-        conn.on('close', () => showError("Transfer interrupted."));
-
-        acceptBtn.addEventListener('click', () => {
-            acceptBtn.classList.add('hidden');
-            downloadProgressBar.classList.remove('hidden');
-            conn.send({ type: 'start-transfer' });
-        });
-        
-        function onWorkerMessage(data) {
-            const { type, payload } = data;
+        worker.onmessage = (event) => {
+            const { type, payload } = event.data;
             if (type === 'progress') {
                 const { percent, bytesSinceLast } = payload;
                 const speed = formatFileSize(bytesSinceLast);
@@ -143,10 +112,31 @@ document.addEventListener('DOMContentLoaded', () => {
                 downloadAreaDiv.classList.remove('hidden');
                 worker.terminate();
             }
-        }
+        };
+        
+        conn.on('data', (data) => {
+            if (data.type === 'file-info') {
+                receivedFileName = data.fileName;
+                receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${data.fileName}</p><p class="text-sm text-zinc-600">${formatFileSize(data.fileSize)}</p>`;
+                acceptBtn.classList.remove('hidden');
+                worker.postMessage({ type: 'info', payload: { fileSize: data.fileSize } });
+            } else {
+                worker.postMessage({ type: 'chunk', payload: data }, [data]);
+            }
+        });
+
+        conn.on('close', () => {
+            showError("Transfer interrupted.");
+            worker.terminate();
+        });
+
+        acceptBtn.addEventListener('click', () => {
+            acceptBtn.classList.add('hidden');
+            downloadProgressBar.classList.remove('hidden');
+            conn.send({ type: 'start-transfer' });
+        });
     }
 
-    // --- SOCKET.IO LISTENERS ---
     socket.on('id-created', (id) => {
         uploadContainer.classList.add('hidden');
         sharingContainer.classList.remove('hidden');
@@ -157,7 +147,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     socket.on('id-not-found', () => showError("Share ID not found. Check the link."));
-    
+
     socket.on('sender-info', (data) => {
         if (!isSender && peer) {
             const conn = peer.connect(data.peerId, { reliable: true });
@@ -169,17 +159,15 @@ document.addEventListener('DOMContentLoaded', () => {
         showError(data.message);
         acceptBtn.classList.add('hidden');
         downloadProgressBar.classList.add('hidden');
-        if (worker) worker.terminate();
     });
 
-    // --- UI EVENT LISTENERS & HELPERS ---
     uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('border-zinc-700'); });
     uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('border-zinc-700'));
     uploadArea.addEventListener('drop', (e) => { e.preventDefault(); uploadArea.classList.remove('border-zinc-700'); if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });
     uploadArea.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => fileInput.files.length && handleFile(fileInput.files[0]));
     shareBtn.addEventListener('click', () => { if (selectedFile && selfPeerId) socket.emit('create-id', { id: generateId(), peerId: selfPeerId }); });
-    
+
     copyBtn.addEventListener('click', () => {
         if (copyTimeout) clearTimeout(copyTimeout);
         linkInput.select();
@@ -200,13 +188,24 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    function handleFile(file) { selectedFile = file; fileInfoDiv.innerHTML = `<p>${file.name} (${formatFileSize(file.size)})</p>`; }
-    function showError(message) { if (errorMessageDiv) errorMessageDiv.textContent = message; }
+    function handleFile(file) {
+        selectedFile = file;
+        fileInfoDiv.innerHTML = `<p>${file.name} (${formatFileSize(file.size)})</p>`;
+    }
+
+    function showError(message) {
+        if (errorMessageDiv) errorMessageDiv.textContent = message;
+    }
+
     function formatFileSize(bytes) {
         if (bytes === 0) return '0 B';
-        const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB'];
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
     }
-    function generateId(length = 6) { return Math.random().toString(36).substring(2, 2 + length); }
+
+    function generateId(length = 6) {
+        return Math.random().toString(36).substring(2, 2 + length);
+    }
 });

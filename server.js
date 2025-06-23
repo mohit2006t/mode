@@ -17,7 +17,7 @@ io.on('connection', (socket) => {
             socket.emit('id-exists', id);
         } else {
             ids[id] = { senderPeerId: peerId };
-            socket.shareId = id; 
+            socket.shareId = id;
             socket.isSender = true;
             socket.join(id);
             socket.emit('id-created', id);

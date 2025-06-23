@@ -19,7 +19,7 @@ self.onmessage = (event) => {
         case 'chunk':
             receivedBuffer.push(payload);
             receivedSize += payload.byteLength;
-            
+
             if (receivedSize >= totalFileSize) {
                 clearInterval(speedInterval);
                 postProgress();
@@ -35,6 +35,6 @@ function postProgress() {
     const percent = totalFileSize > 0 ? (receivedSize / totalFileSize) * 100 : 0;
     const bytesSinceLast = receivedSize - lastReceivedSize;
     lastReceivedSize = receivedSize;
-    
+
     self.postMessage({ type: 'progress', payload: { percent, bytesSinceLast } });
 }
