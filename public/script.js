@@ -24,6 +24,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const CHUNK_SIZE = 256 * 1024;
     let selectedFile = null, peer = null, selfPeerId = null, currentId = null;
     let isSender = true, isSharing = false, copyTimeout = null;
+    
+    let receiverData = {};
 
     const socket = io();
     const urlParams = new URLSearchParams(window.location.search);
@@ -53,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             if (isSender) {
-                peer.on('connection', setupSenderConnection);
+                peer.on('connection', setupSenderConnectionForReceiver);
             }
             peer.on('error', (err) => console.error(`PeerJS error: ${err.message}`));
         } catch (e) {
@@ -61,7 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function setupSenderConnection(conn) {
+    function setupSenderConnectionForReceiver(conn) {
         conn.on('open', () => {
             if (selectedFile) {
                 conn.send({ type: 'file-info', fileName: selectedFile.name, fileSize: selectedFile.size });
@@ -95,46 +97,45 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function setupReceiverConnection(conn) {
-        const worker = new Worker('worker.js');
-        let receivedFileName = '';
-
-        worker.onmessage = (event) => {
-            const { type, payload } = event.data;
-            if (type === 'progress') {
-                const { percent, bytesSinceLast } = payload;
-                const speed = formatFileSize(bytesSinceLast);
-                downloadProgressFill.style.width = `${percent}%`;
-                transferStatsDiv.innerHTML = `<span>${Math.round(percent)}%</span><span class="mx-2 text-zinc-400">|</span><span>${speed}/s</span>`;
-            } else if (type === 'complete') {
-                transferStatsDiv.textContent = 'Transfer complete!';
-                downloadLink.href = URL.createObjectURL(payload);
-                downloadLink.download = receivedFileName;
-                downloadAreaDiv.classList.remove('hidden');
-                worker.terminate();
-            }
+        receiverData = {
+            conn: conn,
+            receivedBuffer: [],
+            receivedSize: 0,
+            totalFileSize: 0,
+            receivedFileName: '',
+            speedInterval: null,
+            lastReceivedSize: 0
         };
-        
-        conn.on('data', (data) => {
-            if (data.type === 'file-info') {
-                receivedFileName = data.fileName;
-                receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${data.fileName}</p><p class="text-sm text-zinc-600">${formatFileSize(data.fileSize)}</p>`;
-                acceptBtn.classList.remove('hidden');
-                worker.postMessage({ type: 'info', payload: { fileSize: data.fileSize } });
-            } else {
-                worker.postMessage({ type: 'chunk', payload: data }, [data]);
+
+        conn.on('data', (data) => onReceiverData(data));
+        conn.on('close', () => showError("Transfer interrupted."));
+    }
+
+    function onReceiverData(data) {
+        if (data.type === 'file-info') {
+            receiverData.totalFileSize = data.fileSize;
+            receiverData.receivedFileName = data.fileName;
+            receivingFileInfoDiv.innerHTML = `<p class="font-semibold">${data.fileName}</p><p class="text-sm text-zinc-600">${formatFileSize(data.fileSize)}</p>`;
+            acceptBtn.classList.remove('hidden');
+        } else {
+            receiverData.receivedBuffer.push(data);
+            receiverData.receivedSize += data.byteLength;
+            if (receiverData.receivedSize >= receiverData.totalFileSize) {
+                assembleAndDownloadFile();
             }
-        });
+        }
+    }
 
-        conn.on('close', () => {
-            showError("Transfer interrupted.");
-            worker.terminate();
-        });
-
-        acceptBtn.addEventListener('click', () => {
-            acceptBtn.classList.add('hidden');
-            downloadProgressBar.classList.remove('hidden');
-            conn.send({ type: 'start-transfer' });
-        });
+    function assembleAndDownloadFile() {
+        updateSpeedAndPercentage();
+        clearInterval(receiverData.speedInterval);
+        transferStatsDiv.textContent = 'Transfer complete!';
+        const blob = new Blob(receiverData.receivedBuffer);
+        downloadLink.href = URL.createObjectURL(blob);
+        downloadLink.download = receiverData.receivedFileName;
+        downloadAreaDiv.classList.remove('hidden');
+        receiverData.receivedBuffer = [];
+        receiverData.receivedSize = 0;
     }
 
     socket.on('id-created', (id) => {
@@ -147,7 +148,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     socket.on('id-not-found', () => showError("Share ID not found. Check the link."));
-
+    
     socket.on('sender-info', (data) => {
         if (!isSender && peer) {
             const conn = peer.connect(data.peerId, { reliable: true });
@@ -159,7 +160,17 @@ document.addEventListener('DOMContentLoaded', () => {
         showError(data.message);
         acceptBtn.classList.add('hidden');
         downloadProgressBar.classList.add('hidden');
+        if (receiverData.speedInterval) clearInterval(receiverData.speedInterval);
     });
+
+    function updateSpeedAndPercentage() {
+        const percent = receiverData.totalFileSize > 0 ? (receiverData.receivedSize / receiverData.totalFileSize) * 100 : 0;
+        downloadProgressFill.style.width = `${percent}%`;
+        const bytesSinceLast = receiverData.receivedSize - receiverData.lastReceivedSize;
+        receiverData.lastReceivedSize = receiverData.receivedSize;
+        const speed = formatFileSize(bytesSinceLast);
+        transferStatsDiv.innerHTML = `<span>${Math.round(percent)}%</span><span class="mx-2 text-zinc-400">|</span><span>${speed}/s</span>`;
+    }
 
     uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('border-zinc-700'); });
     uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('border-zinc-700'));
@@ -167,7 +178,7 @@ document.addEventListener('DOMContentLoaded', () => {
     uploadArea.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => fileInput.files.length && handleFile(fileInput.files[0]));
     shareBtn.addEventListener('click', () => { if (selectedFile && selfPeerId) socket.emit('create-id', { id: generateId(), peerId: selfPeerId }); });
-
+    
     copyBtn.addEventListener('click', () => {
         if (copyTimeout) clearTimeout(copyTimeout);
         linkInput.select();
@@ -181,6 +192,13 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    acceptBtn.addEventListener('click', () => {
+        acceptBtn.classList.add('hidden');
+        downloadProgressBar.classList.remove('hidden');
+        receiverData.conn.send({ type: 'start-transfer' });
+        receiverData.speedInterval = setInterval(updateSpeedAndPercentage, 1000);
+    });
+
     window.addEventListener('beforeunload', (event) => {
         if (isSharing) {
             event.preventDefault();
@@ -188,24 +206,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    function handleFile(file) {
-        selectedFile = file;
-        fileInfoDiv.innerHTML = `<p>${file.name} (${formatFileSize(file.size)})</p>`;
-    }
-
-    function showError(message) {
-        if (errorMessageDiv) errorMessageDiv.textContent = message;
-    }
-
+    function handleFile(file) { selectedFile = file; fileInfoDiv.innerHTML = `<p>${file.name} (${formatFileSize(file.size)})</p>`; }
+    function showError(message) { if (errorMessageDiv) errorMessageDiv.textContent = message; }
     function formatFileSize(bytes) {
         if (bytes === 0) return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
     }
-
-    function generateId(length = 6) {
-        return Math.random().toString(36).substring(2, 2 + length);
-    }
+    function generateId(length = 6) { return Math.random().toString(36).substring(2, 2 + length); }
 });
